@@ -3637,6 +3637,8 @@ func (e *ExpressionEmitter) emitExpression(handle ir.ExpressionHandle) (uint32, 
 		id, err = e.emitMath(kind)
 	case ir.ExprDerivative:
 		id, err = e.emitDerivative(kind)
+	case ir.ExprRelational:
+		id, err = e.emitRelational(handle, kind)
 	case ir.ExprImageSample:
 		id, err = e.emitImageSample(kind)
 	case ir.ExprImageLoad:
@@ -7598,6 +7600,69 @@ func (e *ExpressionEmitter) emitDot4PackedPolyfill(fun ir.MathFunction, resultTy
 	}
 
 	return partialSum, nil
+}
+
+// emitRelational emits a relational builtin. any/all reduce a vector of bools to
+// a single bool; isnan/isinf test each component and keep the argument's shape.
+func (e *ExpressionEmitter) emitRelational(handle ir.ExpressionHandle, rel ir.ExprRelational) (uint32, error) {
+	argID, err := e.emitExpression(rel.Argument)
+	if err != nil {
+		return 0, err
+	}
+
+	var opcode OpCode
+	switch rel.Fun {
+	case ir.RelationalAll:
+		opcode = OpAll
+	case ir.RelationalAny:
+		opcode = OpAny
+	case ir.RelationalIsNan:
+		opcode = OpIsNan
+	case ir.RelationalIsInf:
+		opcode = OpIsInf
+	default:
+		return 0, fmt.Errorf("unsupported relational function: %v", rel.Fun)
+	}
+
+	// OpAny and OpAll require a vector operand. WGSL also accepts a scalar bool,
+	// where both are the identity — there is no vector to reduce, so hand the
+	// argument back rather than emit an instruction SPIR-V would reject.
+	if opcode == OpAny || opcode == OpAll {
+		argType, err := ir.ResolveExpressionType(e.backend.module, e.function, rel.Argument)
+		if err != nil {
+			return 0, fmt.Errorf("relational argument type: %w", err)
+		}
+		argInner, err := e.backend.typeInnerOf(argType)
+		if err != nil {
+			return 0, fmt.Errorf("relational argument type: %w", err)
+		}
+		if _, isVector := argInner.(ir.VectorType); !isVector {
+			return argID, nil
+		}
+	}
+
+	resultRes, err := ir.ResolveExpressionType(e.backend.module, e.function, handle)
+	if err != nil {
+		return 0, fmt.Errorf("relational result type: %w", err)
+	}
+	resultType, err := e.backend.resolveTypeResolution(resultRes)
+	if err != nil {
+		return 0, err
+	}
+
+	return e.backend.builder.AddUnaryOp(opcode, resultType, argID), nil
+}
+
+// typeInnerOf returns the TypeInner a resolution stands for, following a handle
+// into the module's type arena.
+func (b *Backend) typeInnerOf(res ir.TypeResolution) (ir.TypeInner, error) {
+	if res.Handle == nil {
+		return res.Value, nil
+	}
+	if int(*res.Handle) >= len(b.module.Types) {
+		return nil, fmt.Errorf("type handle %d out of range", *res.Handle)
+	}
+	return b.module.Types[*res.Handle].Inner, nil
 }
 
 // emitDerivative emits a derivative function.
