@@ -2,6 +2,9 @@ package codegen
 
 import (
 	"testing"
+
+	"github.com/gogpu/naga/ir"
+	"github.com/gogpu/naga/wgsl"
 )
 
 // The SPIR-V backend had no case for ir.ExprRelational, so `any()` and `all()`
@@ -68,23 +71,70 @@ fn fs_main(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
 	}
 }
 
-// TestRelationalAnyAllOverScalarBool covers the degenerate form. SPIR-V's OpAny
-// and OpAll take a *vector* of bools, so a scalar argument has nothing to reduce
-// and must pass straight through rather than emit an invalid instruction.
+// TestRelationalAnyAllOverScalarBool covers the degenerate form. any(bool) and
+// all(bool) are no-ops, so, as in Rust naga, the WGSL lowerer returns the
+// argument and no Relational reaches the IR — whatever the argument is, not only
+// a literal. Backends then never see a scalar any/all; SPIR-V's OpAny/OpAll
+// would reject one, and GLSL has no any(bool) overload.
 func TestRelationalAnyAllOverScalarBool(t *testing.T) {
+	args := []struct {
+		name string
+		decl string
+		arg  string
+	}{
+		{"comparison", "", "p.x > 0.5"},
+		{"let", "let b = p.x > 0.5;", "b"},
+		{"literal", "", "true"},
+	}
 	for _, fun := range []string{"any", "all"} {
-		t.Run(fun, func(t *testing.T) {
-			src := `
+		for _, a := range args {
+			t.Run(fun+"/"+a.name, func(t *testing.T) {
+				src := `
 @fragment
 fn fs_main(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-    let hit = ` + fun + `(p.x > 0.5);
+    ` + a.decl + `
+    let hit = ` + fun + `(` + a.arg + `);
     return select(vec4<f32>(0.0), vec4<f32>(1.0), hit);
 }
 `
-			spirvBytes := compileRelationalShader(t, fun+"/scalar", src)
-			assertLacksOpcode(t, spirvBytes, OpAny, fun+" over a scalar bool")
-			assertLacksOpcode(t, spirvBytes, OpAll, fun+" over a scalar bool")
-		})
+				assertNoRelationalInIR(t, src)
+				spirvBytes := compileRelationalShader(t, fun+"/"+a.name, src)
+				assertLacksOpcode(t, spirvBytes, OpAny, fun+" over a scalar bool")
+				assertLacksOpcode(t, spirvBytes, OpAll, fun+" over a scalar bool")
+			})
+		}
+	}
+}
+
+// assertNoRelationalInIR lowers source and fails if any function or entry point
+// holds an ir.ExprRelational.
+func assertNoRelationalInIR(t *testing.T, source string) {
+	t.Helper()
+	tokens, err := wgsl.NewLexer(source).Tokenize()
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	ast, err := wgsl.NewParser(tokens).Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	module, err := wgsl.Lower(ast)
+	if err != nil {
+		t.Fatalf("Lower failed: %v", err)
+	}
+	functions := make([]*ir.Function, 0, len(module.Functions)+len(module.EntryPoints))
+	for i := range module.Functions {
+		functions = append(functions, &module.Functions[i])
+	}
+	for i := range module.EntryPoints {
+		functions = append(functions, &module.EntryPoints[i].Function)
+	}
+	for _, fn := range functions {
+		for h, expr := range fn.Expressions {
+			if rel, ok := expr.Kind.(ir.ExprRelational); ok {
+				t.Fatalf("expression %d is %#v; a scalar any/all should not reach the IR", h, rel)
+			}
+		}
 	}
 }
 

@@ -13539,13 +13539,13 @@ func (l *Lowerer) lowerRelationalCall(fun ir.RelationalFunction, args []parser.E
 		return 0, err
 	}
 
-	// Constant fold: any(scalar_bool_literal) and all(scalar_bool_literal) are identity.
-	// When the argument is a single scalar bool (not a vector), any/all just return it.
+	// any(bool) and all(bool) are no-ops: a scalar bool has no vector to reduce,
+	// so the argument is returned unchanged and no Relational reaches the IR.
+	// Matches Rust naga ("Check for no-op all(bool) and any(bool)"), which decides
+	// on the argument's resolved type, not on whether it is a literal.
 	if fun == ir.RelationalAll || fun == ir.RelationalAny {
-		if lit, ok := l.currentFunc.Expressions[arg].Kind.(ir.Literal); ok {
-			if _, isBool := lit.Value.(ir.LiteralBool); isBool {
-				return arg, nil
-			}
+		if scalar, ok := l.resolveExprTypeInner(arg).(ir.ScalarType); ok && scalar.Kind == ir.ScalarBool {
+			return arg, nil
 		}
 	}
 
